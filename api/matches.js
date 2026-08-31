@@ -1,49 +1,65 @@
-const API = 'https://football-live-streaming-api.p.rapidapi.com';
-const POPULAR_LEAGUES = ['Premier League', 'La Liga', 'Serie A', 'Bundesliga', 'Ligue 1', 'Champions League'];
+const API = 'https://api.sportsrc.org/';
+
+function normalizeMatch(m) {
+  const home = m?.teams?.home || {};
+  const away = m?.teams?.away || {};
+  return {
+    id: m.id,
+    home_team_name: home.name || 'Home',
+    away_team_name: away.name || 'Away',
+    home_team_logo: home.badge || '',
+    away_team_logo: away.badge || '',
+    league_name: m.league || m.league_name || m.competition || 'Football',
+    league_logo: m.league_logo || '',
+    match_time: m.date ? Math.floor(Number(m.date) / 1000) : null,
+    match_status: m.status === 'live' || m.live === true ? 'live' : 'upcoming',
+    homeTeamScore: m.score?.home ?? m.home_score ?? null,
+    awayTeamScore: m.score?.away ?? m.away_score ?? null,
+    popular: !!m.popular
+  };
+}
+
+function extractStreams(d) {
+  const candidates = d?.streams || d?.stream || d?.sources || d?.embeds || d?.servers || [];
+  const arr = Array.isArray(candidates) ? candidates : Object.values(candidates || {});
+  return arr.map((s, i) => {
+    if (typeof s === 'string') return { name: `Server ${i + 1}`, type: 'embed', url: s };
+    return {
+      name: s?.name || s?.title || `Server ${i + 1}`,
+      type: s?.type || 'embed',
+      url: s?.url || s?.embed || s?.iframe || s?.src || ''
+    };
+  }).filter(s => s.url);
+}
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
-
-  const key = process.env.RAPIDAPI_KEY;
-  if (!key) return res.status(500).json({ error: 'RAPIDAPI_KEY is not configured on Vercel.' });
-
-  const headers = {
-    'X-RapidAPI-Key': key,
-    'X-RapidAPI-Host': 'football-live-streaming-api.p.rapidapi.com'
-  };
-
-  const { popular, page = '1', status, date, type, league } = req.query || {};
-
+  const { detail, popular, status, league } = req.query || {};
   try {
-    // The API is paginated at 20 matches/page. The popular feed uses the API's
-    // league filter so major competitions are not hidden behind page 1.
-    if (popular === '1' || popular === 'true') {
-      const results = await Promise.all(
-        POPULAR_LEAGUES.map(async (leagueName) => {
-          const params = new URLSearchParams({ league: leagueName, page: '1' });
-          const r = await fetch(`${API}/matches?${params}`, { headers });
-          if (!r.ok) return [];
-          const data = await r.json();
-          return Array.isArray(data) ? data : (data.matches || data.response || []);
-        })
-      );
-      return res.status(200).json({ matches: results.flat() });
+    if (detail) {
+      const u = new URL(API);
+      u.searchParams.set('data', 'detail');
+      u.searchParams.set('category', 'football');
+      u.searchParams.set('id', String(detail));
+      const r = await fetch(u);
+      const d = await r.json();
+      return res.status(r.status).json({ ...d, servers: extractStreams(d) });
     }
 
-    const params = new URLSearchParams({ page: String(page) });
-    if (status) params.set('status', status);
-    if (date) params.set('date', date);
-    if (type) params.set('type', type);
-    if (league) params.set('league', league);
-
-    const response = await fetch(`${API}/matches?${params}`, { headers });
-    const text = await response.text();
-    let data;
-    try { data = JSON.parse(text); } catch { data = { raw: text }; }
-
-    if (!response.ok) return res.status(response.status).json(data);
-    return res.status(200).json(data);
-  } catch (error) {
-    return res.status(500).json({ error: error.message || 'Failed to fetch matches.' });
+    const u = new URL(API);
+    u.searchParams.set('data', 'matches');
+    u.searchParams.set('category', 'football');
+    const r = await fetch(u);
+    const d = await r.json();
+    let matches = Array.isArray(d) ? d : (d.matches || d.data || []);
+    matches = matches.map(normalizeMatch);
+    if (popular === '1' || popular === 'true') matches = matches.filter(m => m.popular);
+    if (status === 'live') matches = matches.filter(m => m.match_status === 'live');
+    if (status === 'vs') matches = matches.filter(m => m.match_status !== 'live');
+    if (league) matches = matches.filter(m => m.league_name.toLowerCase().includes(String(league).toLowerCase()));
+    res.setHeader('Cache-Control', 's-maxage=30, stale-while-revalidate=120');
+    return res.status(r.status).json({ matches });
+  } catch (e) {
+    return res.status(502).json({ error: 'SportSRC API unavailable', detail: e.message });
   }
 }
